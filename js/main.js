@@ -1,386 +1,580 @@
-jQuery.fn.updateWithText = function(text, speed)
-{
-	var dummy = $('<div/>').html(text);
+/* global  Log, Loader, Module, config, defaults */
+/* jshint -W020, esversion: 6 */
 
-	if ($(this).html() != dummy.html())
-	{
-		$(this).fadeOut(speed/2, function() {
-			$(this).html(text);
-			$(this).fadeIn(speed/2, function() {
-				//done
+/* Magic Mirror
+ * Main System
+ *
+ * By Michael Teeuw http://michaelteeuw.nl
+ * MIT Licensed.
+ */
+
+var MM = (function() {
+
+	var modules = [];
+
+	/* Private Methods */
+
+	/* createDomObjects()
+	 * Create dom objects for all modules that
+	 * are configured for a specific position.
+	 */
+	var createDomObjects = function() {
+		var domCreationPromises = [];
+
+		modules.forEach(function(module) {
+			if (typeof module.data.position !== "string") {
+				return;
+			}
+
+			var wrapper = selectWrapper(module.data.position);
+
+			var dom = document.createElement("div");
+			dom.id = module.identifier;
+			dom.className = module.name;
+
+			if (typeof module.data.classes === "string") {
+				dom.className = "module " + dom.className + " " + module.data.classes;
+			}
+
+			dom.opacity = 0;
+			wrapper.appendChild(dom);
+
+			if (typeof module.data.header !== "undefined" && module.data.header !== "") {
+				var moduleHeader = document.createElement("header");
+				moduleHeader.innerHTML = module.data.header;
+				moduleHeader.className = "module-header";
+				dom.appendChild(moduleHeader);
+			}
+
+			var moduleContent = document.createElement("div");
+			moduleContent.className = "module-content";
+			dom.appendChild(moduleContent);
+
+			var domCreationPromise = updateDom(module, 0);
+			domCreationPromises.push(domCreationPromise);
+			domCreationPromise.then(function() {
+				sendNotification("MODULE_DOM_CREATED", null, null, module);
+			}).catch(Log.error);
+		});
+
+		updateWrapperStates();
+
+		Promise.all(domCreationPromises).then(function() {
+			sendNotification("DOM_OBJECTS_CREATED");
+		});
+	};
+
+	/* selectWrapper(position)
+	 * Select the wrapper dom object for a specific position.
+	 *
+	 * argument position string - The name of the position.
+	 */
+	var selectWrapper = function(position) {
+		var classes = position.replace("_"," ");
+		var parentWrapper = document.getElementsByClassName(classes);
+		if (parentWrapper.length > 0) {
+			var wrapper = parentWrapper[0].getElementsByClassName("container");
+			if (wrapper.length > 0) {
+				return wrapper[0];
+			}
+		}
+	};
+
+	/* sendNotification(notification, payload, sender)
+	 * Send a notification to all modules.
+	 *
+	 * argument notification string - The identifier of the notification.
+	 * argument payload mixed - The payload of the notification.
+	 * argument sender Module - The module that sent the notification.
+	 * argument sendTo Module - The module to send the notification to. (optional)
+	 */
+	var sendNotification = function(notification, payload, sender, sendTo) {
+		for (var m in modules) {
+			var module = modules[m];
+			if (module !== sender && (!sendTo || module === sendTo)) {
+				module.notificationReceived(notification, payload, sender);
+			}
+		}
+	};
+
+	/* updateDom(module, speed)
+	 * Update the dom for a specific module.
+	 *
+	 * argument module Module - The module that needs an update.
+	 * argument speed Number - The number of microseconds for the animation. (optional)
+	 *
+	 * return Promise - Resolved when the dom is fully updated.
+	 */
+	var updateDom = function(module, speed) {
+		return new Promise(function(resolve) {
+			var newContentPromise = module.getDom();
+			var newHeader = module.getHeader();
+
+			if (!(newContentPromise instanceof Promise)) {
+				// convert to a promise if not already one to avoid if/else's everywhere
+				newContentPromise = Promise.resolve(newContentPromise);
+			}
+
+			newContentPromise.then(function(newContent) {
+				var updatePromise = updateDomWithContent(module, speed, newHeader, newContent);
+
+				updatePromise.then(resolve).catch(Log.error);
+			}).catch(Log.error);
+		});
+	};
+
+	/* updateDomWithContent(module, speed, newHeader, newContent)
+	 * Update the dom with the specified content
+	 *
+	 * argument module Module - The module that needs an update.
+	 * argument speed Number - The number of microseconds for the animation. (optional)
+	 * argument newHeader String - The new header that is generated.
+	 * argument newContent Domobject - The new content that is generated.
+	 *
+	 * return Promise - Resolved when the module dom has been updated.
+	 */
+	var updateDomWithContent = function(module, speed, newHeader, newContent) {
+		return new Promise(function(resolve) {
+			if (module.hidden || !speed) {
+				updateModuleContent(module, newHeader, newContent);
+				resolve();
+				return;
+			}
+
+			if (!moduleNeedsUpdate(module, newHeader, newContent)) {
+				resolve();
+				return;
+			}
+
+			if (!speed) {
+				updateModuleContent(module, newHeader, newContent);
+				resolve();
+				return;
+			}
+
+			hideModule(module, speed / 2, function() {
+				updateModuleContent(module, newHeader, newContent);
+				if (!module.hidden) {
+					showModule(module, speed / 2);
+				}
+				resolve();
 			});
 		});
-	}
-}
+	};
 
-jQuery.fn.outerHTML = function(s) {
-    return s
-        ? this.before(s).remove()
-        : jQuery("<p>").append(this.eq(0).clone()).html();
-};
+	/* moduleNeedsUpdate(module, newContent)
+	 * Check if the content has changed.
+	 *
+	 * argument module Module - The module to check.
+	 * argument newHeader String - The new header that is generated.
+	 * argument newContent Domobject - The new content that is generated.
+	 *
+	 * return bool - Does the module need an update?
+	 */
+	var moduleNeedsUpdate = function(module, newHeader, newContent) {
+		var moduleWrapper = document.getElementById(module.identifier);
+		var contentWrapper = moduleWrapper.getElementsByClassName("module-content");
+		var headerWrapper = moduleWrapper.getElementsByClassName("module-header");
 
-function roundVal(temp)
-{
-	return Math.round(temp * 10) / 10;
-}
+		var headerNeedsUpdate = false;
+		var contentNeedsUpdate = false;
 
-function kmh2beaufort(kmh)
-{
-	var speeds = [1, 5, 11, 19, 28, 38, 49, 61, 74, 88, 102, 117, 1000];
-	for (var beaufort in speeds) {
-		var speed = speeds[beaufort];
-		if (speed > kmh) {
-			return beaufort;
+		if (headerWrapper.length > 0) {
+			headerNeedsUpdate = newHeader !== headerWrapper[0].innerHTML;
 		}
-	}
-	return 12;
-}
 
-jQuery(document).ready(function($) {
+		var tempContentWrapper = document.createElement("div");
+		tempContentWrapper.appendChild(newContent);
+		contentNeedsUpdate = tempContentWrapper.innerHTML !== contentWrapper[0].innerHTML;
 
-	var news = [];
-	var newsIndex = 0;
+		return headerNeedsUpdate || contentNeedsUpdate;
+	};
 
-	var eventList = [];
+	/* moduleNeedsUpdate(module, newContent)
+	 * Update the content of a module on screen.
+	 *
+	 * argument module Module - The module to check.
+	 * argument newHeader String - The new header that is generated.
+	 * argument newContent Domobject - The new content that is generated.
+	 */
+	var updateModuleContent = function(module, newHeader, newContent) {
+		var moduleWrapper = document.getElementById(module.identifier);
+		var headerWrapper = moduleWrapper.getElementsByClassName("module-header");
+		var contentWrapper = moduleWrapper.getElementsByClassName("module-content");
 
-	var lastCompliment;
-	var compliment;
+		contentWrapper[0].innerHTML = "";
+		contentWrapper[0].appendChild(newContent);
 
-    moment.lang(lang);
+		if( headerWrapper.length > 0 && newHeader) {
+			headerWrapper[0].innerHTML = newHeader;
+		}
+	};
 
-	//connect do Xbee monitor
-	// var socket = io.connect('http://rpi-alarm.local:8082');
-	// socket.on('dishwasher', function (dishwasherReady) {
-	// 	if (dishwasherReady) {
-	// 		$('.dishwasher').fadeIn(2000);
-	// 		$('.lower-third').fadeOut(2000);
-	// 	} else {
-	// 		$('.dishwasher').fadeOut(2000);
-	// 		$('.lower-third').fadeIn(2000);
-	// 	}
-	// });
+	/* hideModule(module, speed, callback)
+	 * Hide the module.
+	 *
+	 * argument module Module - The module to hide.
+	 * argument speed Number - The speed of the hide animation.
+	 * argument callback function - Called when the animation is done.
+	 */
+	var hideModule = function(module, speed, callback, options) {
+		options = options || {};
 
-
-	(function checkVersion()
-	{
-		$.getJSON('githash.php', {}, function(json, textStatus) {
-			if (json) {
-				if (json.gitHash != gitHash) {
-					window.location.reload();
-					window.location.href=window.location.href;
-				}
+		// set lockString if set in options.
+		if (options.lockString) {
+			// Log.log("Has lockstring: " + options.lockString);
+			if (module.lockStrings.indexOf(options.lockString) === -1) {
+				module.lockStrings.push(options.lockString);
 			}
+		}
+
+		var moduleWrapper = document.getElementById(module.identifier);
+		if (moduleWrapper !== null) {
+			moduleWrapper.style.transition = "opacity " + speed / 1000 + "s";
+			moduleWrapper.style.opacity = 0;
+
+			clearTimeout(module.showHideTimer);
+			module.showHideTimer = setTimeout(function() {
+				// To not take up any space, we just make the position absolute.
+				// since it's fade out anyway, we can see it lay above or
+				// below other modules. This works way better than adjusting
+				// the .display property.
+				moduleWrapper.style.position = "fixed";
+
+				updateWrapperStates();
+
+				if (typeof callback === "function") { callback(); }
+			}, speed);
+		} else {
+			// invoke callback even if no content, issue 1308
+			if (typeof callback === "function") { callback(); }
+		}
+	};
+
+	/* showModule(module, speed, callback)
+	 * Show the module.
+	 *
+	 * argument module Module - The module to show.
+	 * argument speed Number - The speed of the show animation.
+	 * argument callback function - Called when the animation is done.
+	 */
+	var showModule = function(module, speed, callback, options) {
+		options = options || {};
+
+		// remove lockString if set in options.
+		if (options.lockString) {
+			var index = module.lockStrings.indexOf(options.lockString);
+			if ( index !== -1) {
+				module.lockStrings.splice(index, 1);
+			}
+		}
+
+		// Check if there are no more lockstrings set, or the force option is set.
+		// Otherwise cancel show action.
+		if (module.lockStrings.length !== 0 && options.force !== true) {
+			Log.log("Will not show " + module.name + ". LockStrings active: " + module.lockStrings.join(","));
+			return;
+		}
+
+		module.hidden = false;
+
+		// If forced show, clean current lockstrings.
+		if (module.lockStrings.length !== 0 && options.force === true) {
+			Log.log("Force show of module: " + module.name);
+			module.lockStrings = [];
+		}
+
+		var moduleWrapper = document.getElementById(module.identifier);
+		if (moduleWrapper !== null) {
+			moduleWrapper.style.transition = "opacity " + speed / 1000 + "s";
+			// Restore the postition. See hideModule() for more info.
+			moduleWrapper.style.position = "static";
+
+			updateWrapperStates();
+
+			// Waiting for DOM-changes done in updateWrapperStates before we can start the animation.
+			var dummy = moduleWrapper.parentElement.parentElement.offsetHeight;
+			moduleWrapper.style.opacity = 1;
+
+			clearTimeout(module.showHideTimer);
+			module.showHideTimer = setTimeout(function() {
+				if (typeof callback === "function") { callback(); }
+			}, speed);
+
+		}
+	};
+
+	/* updateWrapperStates()
+	 * Checks for all positions if it has visible content.
+	 * If not, if will hide the position to prevent unwanted margins.
+	 * This method schould be called by the show and hide methods.
+	 *
+	 * Example:
+	 * If the top_bar only contains the update notification. And no update is available,
+	 * the update notification is hidden. The top bar still occupies space making for
+	 * an ugly top margin. By using this function, the top bar will be hidden if the
+	 * update notification is not visible.
+	 */
+
+	var updateWrapperStates = function() {
+		var positions = ["top_bar", "top_left", "top_center", "top_right", "upper_third", "middle_center", "lower_third", "bottom_left", "bottom_center", "bottom_right", "bottom_bar", "fullscreen_above", "fullscreen_below"];
+
+		positions.forEach(function(position) {
+			var wrapper = selectWrapper(position);
+			var moduleWrappers = wrapper.getElementsByClassName("module");
+
+			var showWrapper = false;
+			Array.prototype.forEach.call(moduleWrappers, function(moduleWrapper) {
+				if (moduleWrapper.style.position == "" || moduleWrapper.style.position == "static") {
+					showWrapper = true;
+				}
+			});
+
+			wrapper.style.display = showWrapper ? "block" : "none";
 		});
-		setTimeout(function() {
-			checkVersion();
-		}, 3000);
-	})();
+	};
 
-	(function updateTime()
-	{
-        var now = moment();
-        var date = now.format('LLLL').split(' ',4);
-        date = date[0] + ' ' + date[1] + ' ' + date[2] + ' ' + date[3];
+	/* loadConfig()
+	 * Loads the core config and combines it with de system defaults.
+	 */
+	var loadConfig = function() {
+		if (typeof config === "undefined") {
+			config = defaults;
+			Log.error("Config file is missing! Please create a config file.");
+			return;
+		}
 
-		$('.date').html(date);
-		$('.time').html(now.format('HH') + ':' + now.format('mm') + '<span class="sec">'+now.format('ss')+'</span>');
+		config = Object.assign({}, defaults, config);
+	};
 
-		setTimeout(function() {
-			updateTime();
-		}, 1000);
-	})();
+	/* setSelectionMethodsForModules()
+	 * Adds special selectors on a collection of modules.
+	 *
+	 * argument modules array - Array of modules.
+	 */
+	var setSelectionMethodsForModules = function(modules) {
 
-	(function updateCalendarData()
-	{
-		new ical_parser("calendar.php", function(cal){
-        	events = cal.getEvents();
-        	eventList = [];
+		/* withClass(className)
+		 * calls modulesByClass to filter modules with the specified classes.
+		 *
+		 * argument className string/array - one or multiple classnames. (array or space divided)
+		 *
+		 * return array - Filtered collection of modules.
+		 */
+		var withClass = function(className) {
+			return modulesByClass(className, true);
+		};
 
-        	for (var i in events) {
-        		var e = events[i];
-        		for (var key in e) {
-        			var value = e[key];
-					var seperator = key.search(';');
-					if (seperator >= 0) {
-						var mainKey = key.substring(0,seperator);
-						var subKey = key.substring(seperator+1);
+		/* exceptWithClass(className)
+		 * calls modulesByClass to filter modules without the specified classes.
+		 *
+		 * argument className string/array - one or multiple classnames. (array or space divided)
+		 *
+		 * return array - Filtered collection of modules.
+		 */
+		var exceptWithClass  = function(className) {
+			return modulesByClass(className, false);
+		};
 
-						var dt;
-						if (subKey == 'VALUE=DATE') {
-							//date
-							dt = new Date(value.substring(0,4), value.substring(4,6) - 1, value.substring(6,8));
-						} else {
-							//time
-							dt = new Date(value.substring(0,4), value.substring(4,6) - 1, value.substring(6,8), value.substring(9,11), value.substring(11,13), value.substring(13,15));
-						}
+		/* modulesByClass(className, include)
+		 * filters a collection of modules based on classname(s).
+		 *
+		 * argument className string/array - one or multiple classnames. (array or space divided)
+		 * argument include boolean - if the filter should include or exclude the modules with the specific classes.
+		 *
+		 * return array - Filtered collection of modules.
+		 */
+		var modulesByClass = function(className, include) {
+			var searchClasses = className;
+			if (typeof className === "string") {
+				searchClasses = className.split(" ");
+			}
 
-						if (mainKey == 'DTSTART') e.startDate = dt;
-						if (mainKey == 'DTEND') e.endDate = dt;
+			var newModules = modules.filter(function(module) {
+				var classes = module.data.classes.toLowerCase().split(" ");
+
+				for (var c in searchClasses) {
+					var searchClass = searchClasses[c];
+					if (classes.indexOf(searchClass.toLowerCase()) !== -1) {
+						return include;
 					}
-        		}
-
-                if (e.startDate == undefined){
-                    //some old events in Gmail Calendar is "start_date"
-                    //FIXME: problems with Gmail's TimeZone
-            		var days = moment(e.DTSTART).diff(moment(), 'days');
-            		var seconds = moment(e.DTSTART).diff(moment(), 'seconds');
-                    var startDate = moment(e.DTSTART);
-                } else {
-            		var days = moment(e.startDate).diff(moment(), 'days');
-            		var seconds = moment(e.startDate).diff(moment(), 'seconds');
-                    var startDate = moment(e.startDate);
-                }
-
-        		//only add fututre events, days doesn't work, we need to check seconds
-        		if (seconds >= 0) {
-                    if (seconds <= 60*60*5 || seconds >= 60*60*24*2) {
-                        var time_string = moment(startDate).fromNow();
-                    }else {
-                        var time_string = moment(startDate).calendar()
-                    }
-                    if (!e.RRULE) {
-    	        		eventList.push({'description':e.SUMMARY,'seconds':seconds,'days':time_string});
-                    }
-                    e.seconds = seconds;
-        		}
-                
-                // Special handling for rrule events
-                if (e.RRULE) {
-                    var options = new RRule.parseString(e.RRULE);
-                    options.dtstart = e.startDate;
-                    var rule = new RRule(options);
-                    
-                    // TODO: don't use fixed end date here, use something like now() + 1 year
-                    var dates = rule.between(new Date(), new Date(2016,11,31), true, function (date, i){return i < 10});
-                    for (date in dates) {
-                        var dt = new Date(dates[date]);
-                        var days = moment(dt).diff(moment(), 'days');
-                        var seconds = moment(dt).diff(moment(), 'seconds');
-                        var startDate = moment(dt);
-                     	if (seconds >= 0) {
-                            if (seconds <= 60*60*5 || seconds >= 60*60*24*2) {
-                                var time_string = moment(dt).fromNow();
-                            } else {
-                                var time_string = moment(dt).calendar()
-                            }
-                            eventList.push({'description':e.SUMMARY,'seconds':seconds,'days':time_string});
-                        }           
-                    }
-                }
-            };
-        	eventList.sort(function(a,b){return a.seconds-b.seconds});
-
-        	setTimeout(function() {
-        		updateCalendarData();
-        	}, 60000);
-    	});
-	})();
-
-	(function updateCalendar()
-	{
-		table = $('<table/>').addClass('xsmall').addClass('calendar-table');
-		opacity = 1;
-
-
-		for (var i in eventList) {
-			var e = eventList[i];
-
-			var row = $('<tr/>').css('opacity',opacity);
-			row.append($('<td/>').html(e.description).addClass('description'));
-			row.append($('<td/>').html(e.days).addClass('days dimmed'));
-			table.append(row);
-
-			opacity -= 1 / eventList.length;
-		}
-
-		$('.calendar').updateWithText(table,1000);
-
-		setTimeout(function() {
-        	updateCalendar();
-        }, 1000);
-	})();
-
-	(function updateCompliment()
-	{
-        //see compliments.js
-		while (compliment == lastCompliment) {
-     
-      //Check for current time  
-      var compliments;
-      var date = new Date();
-      var hour = date.getHours();
-      //set compliments to use
-      if (hour >= 3 && hour < 12) compliments = morning;
-      if (hour >= 12 && hour < 17) compliments = afternoon;
-      if (hour >= 17 || hour < 3) compliments = evening;
-
-		compliment = Math.floor(Math.random()*compliments.length);
-		}
-
-		$('.compliment').updateWithText(compliments[compliment], 4000);
-
-		lastCompliment = compliment;
-
-		setTimeout(function() {
-			updateCompliment(true);
-		}, 30000);
-
-	})();
-
-	(function updateCurrentWeather()
-	{
-		var iconTable = {
-			'01d':'wi-day-sunny',
-			'02d':'wi-day-cloudy',
-			'03d':'wi-cloudy',
-			'04d':'wi-cloudy-windy',
-			'09d':'wi-showers',
-			'10d':'wi-rain',
-			'11d':'wi-thunderstorm',
-			'13d':'wi-snow',
-			'50d':'wi-fog',
-			'01n':'wi-night-clear',
-			'02n':'wi-night-cloudy',
-			'03n':'wi-night-cloudy',
-			'04n':'wi-night-cloudy',
-			'09n':'wi-night-showers',
-			'10n':'wi-night-rain',
-			'11n':'wi-night-thunderstorm',
-			'13n':'wi-night-snow',
-			'50n':'wi-night-alt-cloudy-windy'
-		}
-
-
-		$.getJSON('http://api.openweathermap.org/data/2.5/weather', weatherParams, function(json, textStatus) {
-
-			var temp = roundVal(json.main.temp);
-			var temp_min = roundVal(json.main.temp_min);
-			var temp_max = roundVal(json.main.temp_max);
-
-			var wind = roundVal(json.wind.speed);
-
-			var iconClass = iconTable[json.weather[0].icon];
-			var icon = $('<span/>').addClass('icon').addClass('dimmed').addClass('wi').addClass(iconClass);
-			$('.temp').updateWithText(icon.outerHTML()+temp+'&deg;', 1000);
-
-			// var forecast = 'Min: '+temp_min+'&deg;, Max: '+temp_max+'&deg;';
-			// $('.forecast').updateWithText(forecast, 1000);
-
-			var now = new Date();
-			var sunrise = new Date(json.sys.sunrise*1000).toTimeString().substring(0,5);
-			var sunset = new Date(json.sys.sunset*1000).toTimeString().substring(0,5);
-
-			var windString = '<span class="wi wi-strong-wind xdimmed"></span> ' + kmh2beaufort(wind) ;
-			var sunString = '<span class="wi wi-sunrise xdimmed"></span> ' + sunrise;
-			if (json.sys.sunrise*1000 < now && json.sys.sunset*1000 > now) {
-				sunString = '<span class="wi wi-sunset xdimmed"></span> ' + sunset;
-			}
-
-			$('.windsun').updateWithText(windString+' '+sunString, 1000);
-		});
-
-		setTimeout(function() {
-			updateCurrentWeather();
-		}, 60000);
-	})();
-
-	(function updateWeatherForecast()
-	{
-		var iconTable = {
-			'01d':'wi-day-sunny',
-			'02d':'wi-day-cloudy',
-			'03d':'wi-cloudy',
-			'04d':'wi-cloudy-windy',
-			'09d':'wi-showers',
-			'10d':'wi-rain',
-			'11d':'wi-thunderstorm',
-			'13d':'wi-snow',
-			'50d':'wi-fog',
-			'01n':'wi-night-clear',
-			'02n':'wi-night-cloudy',
-			'03n':'wi-night-cloudy',
-			'04n':'wi-night-cloudy',
-			'09n':'wi-night-showers',
-			'10n':'wi-night-rain',
-			'11n':'wi-night-thunderstorm',
-			'13n':'wi-night-snow',
-			'50n':'wi-night-alt-cloudy-windy'
-		}
-			$.getJSON('http://api.openweathermap.org/data/2.5/forecast', weatherParams, function(json, textStatus) {
-
-			var forecastData = {};
-
-			for (var i in json.list) {
-				var forecast = json.list[i];
-				var dateKey  = forecast.dt_txt.substring(0, 10);
-
-				if (forecastData[dateKey] == undefined) {
-					forecastData[dateKey] = {
-						'timestamp':forecast.dt * 1000,
-						'icon':forecast.weather[0].icon,
-						'temp_min':forecast.main.temp,
-						'temp_max':forecast.main.temp
-					};
-				} else {
-					forecastData[dateKey]['icon'] = forecast.weather[0].icon;
-					forecastData[dateKey]['temp_min'] = (forecast.main.temp < forecastData[dateKey]['temp_min']) ? forecast.main.temp : forecastData[dateKey]['temp_min'];
-					forecastData[dateKey]['temp_max'] = (forecast.main.temp > forecastData[dateKey]['temp_max']) ? forecast.main.temp : forecastData[dateKey]['temp_max'];
 				}
 
+				return !include;
+			});
+
+			setSelectionMethodsForModules(newModules);
+			return newModules;
+		};
+
+		/* exceptModule(module)
+		 * Removes a module instance from the collection.
+		 *
+		 * argument module Module object - The module instance to remove from the collection.
+		 *
+		 * return array - Filtered collection of modules.
+		 */
+		var exceptModule = function(module) {
+			var newModules = modules.filter(function(mod) {
+				return mod.identifier !== module.identifier;
+			});
+
+			setSelectionMethodsForModules(newModules);
+			return newModules;
+		};
+
+		/* enumerate(callback)
+		 * Walks thru a collection of modules and executes the callback with the module as an argument.
+		 *
+		 * argument callback function - The function to execute with the module as an argument.
+		 */
+		var enumerate = function(callback) {
+			modules.map(function(module) {
+				callback(module);
+			});
+		};
+
+		if (typeof modules.withClass === "undefined") { Object.defineProperty(modules, "withClass",  {value: withClass, enumerable: false}); }
+		if (typeof modules.exceptWithClass === "undefined") { Object.defineProperty(modules, "exceptWithClass",  {value: exceptWithClass, enumerable: false}); }
+		if (typeof modules.exceptModule === "undefined") { Object.defineProperty(modules, "exceptModule",  {value: exceptModule, enumerable: false}); }
+		if (typeof modules.enumerate === "undefined") { Object.defineProperty(modules, "enumerate",  {value: enumerate, enumerable: false}); }
+	};
+
+	return {
+		/* Public Methods */
+
+		/* init()
+		 * Main init method.
+		 */
+		init: function() {
+			Log.info("Initializing MagicMirror.");
+			loadConfig();
+			Translator.loadCoreTranslations(config.language);
+			Loader.loadModules();
+		},
+
+		/* modulesStarted(moduleObjects)
+		 * Gets called when all modules are started.
+		 *
+		 * argument moduleObjects array<Module> - All module instances.
+		 */
+		modulesStarted: function(moduleObjects) {
+			modules = [];
+			for (var m in moduleObjects) {
+				var module = moduleObjects[m];
+				modules[module.data.index] = module;
 			}
 
+			Log.info("All modules started!");
+			sendNotification("ALL_MODULES_STARTED");
 
-			var forecastTable = $('<table />').addClass('forecast-table');
-			var opacity = 1;
-			for (var i in forecastData) {
-				var forecast = forecastData[i];
-			    var iconClass = iconTable[forecast.icon];
-				var dt = new Date(forecast.timestamp);
-				var row = $('<tr />').css('opacity', opacity);
+			createDomObjects();
+		},
 
-				row.append($('<td/>').addClass('day').html(moment.weekdaysShort(dt.getDay())));
-				row.append($('<td/>').addClass('icon-small').addClass(iconClass));
-				row.append($('<td/>').addClass('temp-max').html(roundVal(forecast.temp_max)));
-				row.append($('<td/>').addClass('temp-min').html(roundVal(forecast.temp_min)));
-
-				forecastTable.append(row);
-				opacity -= 0.155;
+		/* sendNotification(notification, payload, sender)
+		 * Send a notification to all modules.
+		 *
+		 * argument notification string - The identifier of the noitication.
+		 * argument payload mixed - The payload of the notification.
+		 * argument sender Module - The module that sent the notification.
+		 */
+		sendNotification: function(notification, payload, sender) {
+			if (arguments.length < 3) {
+				Log.error("sendNotification: Missing arguments.");
+				return;
 			}
 
+			if (typeof notification !== "string") {
+				Log.error("sendNotification: Notification should be a string.");
+				return;
+			}
 
-			$('.forecast').updateWithText(forecastTable, 1000);
-		});
+			if (!(sender instanceof Module)) {
+				Log.error("sendNotification: Sender should be a module.");
+				return;
+			}
 
-		setTimeout(function() {
-			updateWeatherForecast();
-		}, 60000);
-	})();
+			// Further implementation is done in the private method.
+			sendNotification(notification, payload, sender);
+		},
 
-	(function fetchNews() {
-		$.feedToJson({
-			feed: feed,
-			success: function(data){
-				news = [];
-				for (var i in data.item) {
-					var item = data.item[i];
-					news.push(item.title);
+		/* updateDom(module, speed)
+		 * Update the dom for a specific module.
+		 *
+		 * argument module Module - The module that needs an update.
+		 * argument speed Number - The number of microseconds for the animation. (optional)
+		 */
+		updateDom: function(module, speed) {
+			if (!(module instanceof Module)) {
+				Log.error("updateDom: Sender should be a module.");
+				return;
+			}
+
+			// Further implementation is done in the private method.
+			updateDom(module, speed);
+		},
+
+		/* getModules(module, speed)
+		 * Returns a collection of all modules currently active.
+		 *
+		 * return array - A collection of all modules currently active.
+		 */
+		getModules: function() {
+			setSelectionMethodsForModules(modules);
+			return modules;
+		},
+
+		/* hideModule(module, speed, callback)
+		 * Hide the module.
+		 *
+		 * argument module Module - The module hide.
+		 * argument speed Number - The speed of the hide animation.
+		 * argument callback function - Called when the animation is done.
+		 * argument options object - Optional settings for the hide method.
+		 */
+		hideModule: function(module, speed, callback, options) {
+			module.hidden = true;
+			hideModule(module, speed, callback, options);
+		},
+
+		/* showModule(module, speed, callback)
+		 * Show the module.
+		 *
+		 * argument module Module - The module show.
+		 * argument speed Number - The speed of the show animation.
+		 * argument callback function - Called when the animation is done.
+		 * argument options object - Optional settings for the hide method.
+		 */
+		showModule: function(module, speed, callback, options) {
+			// do not change module.hidden yet, only if we really show it later
+			showModule(module, speed, callback, options);
+		}
+	};
+
+})();
+
+// Add polyfill for Object.assign.
+if (typeof Object.assign != "function") {
+	(function() {
+		Object.assign = function(target) {
+			"use strict";
+			if (target === undefined || target === null) {
+				throw new TypeError("Cannot convert undefined or null to object");
+			}
+			var output = Object(target);
+			for (var index = 1; index < arguments.length; index++) {
+				var source = arguments[index];
+				if (source !== undefined && source !== null) {
+					for (var nextKey in source) {
+						if (source.hasOwnProperty(nextKey)) {
+							output[nextKey] = source[nextKey];
+						}
+					}
 				}
 			}
-		});
-		setTimeout(function() {
-			fetchNews();
-		}, 60000);
+			return output;
+		};
 	})();
+}
 
-	(function showNews() {
-		var newsItem = news[newsIndex];
-		$('.news').updateWithText(newsItem,2000);
-
-		newsIndex--;
-		if (newsIndex < 0) newsIndex = news.length - 1;
-		setTimeout(function() {
-			showNews();
-		}, 5500);
-	})();
-
-});
+MM.init();
